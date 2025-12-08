@@ -1,0 +1,30 @@
+all assistant cost 
+
+
+curl --location 'https://api.vapi.ai/analytics' \
+--header 'authorization: Bearer 81a36441-2172-4b19-8dc1-ea56fd879341' \
+--header 'content-type: application/json' \
+--header 'Cookie: _cfuvid=mn9dzTJI3uSS_sHLgf7mRM4IvUWPQH4bNtbzxupJXXY-1764842544.8205059-1.0.1.1-uz4jI6xhusv_t0PEmU56PEpI_s9YFeG3YkXXHkqVyJE' \
+--data '{
+    "queries": [{
+      "name": "Cost Analysis",
+      "table": "call",
+      "timeRange": {
+        "start": "2025-11-12T18:30:00.000Z",
+        "end": "2025-12-17T05:31:10.184Z",
+        "step": "day"
+      },
+      "operations": [{
+        "operation": "sum",
+        "column": "cost",
+        "alias": "total_cost"
+      }],
+      "groupBy": ["assistantId"]
+    }]
+  }'
+
+
+
+
+
+  

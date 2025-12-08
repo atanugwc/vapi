@@ -1,0 +1,11 @@
+Create a assistant  (private key needed)
+
+ts-node update.ts
+
+Update a assistant  (private key needed)
+
+ts-node create.ts
+
+Delete a assistant  (private key needed)
+
+ts-node delete.ts
