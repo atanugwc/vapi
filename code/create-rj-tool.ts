@@ -43,7 +43,8 @@ require('dotenv').config();
           "subscriber_id",
           "booking_intention",
           "appointment_confirmed",
-          "note"
+          "note",
+          "task"
         ],
         "properties": {
       "name": {
@@ -127,7 +128,12 @@ require('dotenv').config();
         "default": ""
       },
       "note":{
-        "description": "Note from the patient.[Note1, Note2, Note3, etc., Other insurance provider name ]",
+        "description": "notes,reasons, and reminders from the patient, stored as an array of strings. Examples: ['note 1', 'reason 1', 'reminder 1', 'insurance 1', 'Other insurance provider name'].",
+        "type": "string",
+        "default": ""
+      },
+      "task":{
+        "description": "any action/task asked/needed after the call",
         "type": "string",
         "default": ""
       }
