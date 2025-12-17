@@ -20,7 +20,7 @@ import {
 } from '../services/dentrixAppointment.service';
 import { getRedisData } from "../utils/redis";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
-import { s3BucketName, s3Client } from "../config/s3";
+import { aiReceptionistBucketName, s3BucketName, s3Client } from "../config/s3";
 dotenv.config();
 const db4 = getMongoConnection('db4');
 const DentalAssistantModel = getDentalAssistantModel(db4);
@@ -111,6 +111,7 @@ export const getAiReceptionistSettingsService = async (data: { practice_id: stri
                             agent_name,
                             call_forwarding,
                             forward_after_ring,
+                            is_appointment_booking_allowed,
                             created_at,
                             updated_at
                         ${additional_query}
@@ -143,7 +144,7 @@ export const getAiReceptionistSettingsService = async (data: { practice_id: stri
 
 export const updateAiReceptionistSettingsService = async (data: AiReceptionistObject): Promise<AiReceptionistSettings> => {
 
-    const { practice_id, custom_instructions, agent_name, call_forwarding, forward_after_ring, is_assistant_changed = false } = data;
+    const { practice_id, custom_instructions, agent_name, call_forwarding, forward_after_ring, is_assistant_changed = false, is_appointment_booking_allowed = true } = data;
 
     // check if practice settings already exist
     const check_query = `SELECT ars.practice_id, va.assistant_id, p.name AS practice_name 
@@ -193,6 +194,7 @@ export const updateAiReceptionistSettingsService = async (data: AiReceptionistOb
                             agent_name = COALESCE($3, agent_name),
                             call_forwarding = COALESCE($4, call_forwarding),
                             forward_after_ring = COALESCE($5, forward_after_ring),
+                            is_appointment_booking_allowed = $6,
                             updated_at = NOW()
                         WHERE practice_id = $1
     `;
@@ -201,7 +203,8 @@ export const updateAiReceptionistSettingsService = async (data: AiReceptionistOb
         custom_instructions ? JSON.stringify(custom_instructions) : null,
         agent_name,
         call_forwarding,
-        forward_after_ring
+        forward_after_ring,
+        is_appointment_booking_allowed
     ];
 
     const transaction = await postgresDB.beginTransaction() as PoolClient;
@@ -226,7 +229,7 @@ export const updateAiReceptionistSettingsService = async (data: AiReceptionistOb
                             role: "system",
                             content: `[Fetch Important Details]
 - Trigger \`important_details\` tool at first in top priority to fetch important details to be used in the conversation.
-  - If the tool fails to fetch the details, say: “Sorry for the delay” and use {{now}} as the current date. Then proceed to next section.
+  - If the tool fails to fetch the details, use {{now}} as the current date. Then proceed to next section.
 
 [Custom Instructions]
 ${custom_instructions && custom_instructions.length ? custom_instructions.map((inst: any) => `- ${inst}`).join('\n') : ''}
@@ -248,7 +251,9 @@ You are ${agent_name}, a professional AI dental voice assistant. Your goal is to
 - Keep responses concise and focused on appointments.  
 - always Trigger \`send_json\` tool with all the keys and values can be empty strings before trigger \`end_call_tool\`.
 - If the caller is old patient/returning patient/visited before then skip all insurance related questions.
-- Store dates internally in **yyyy-mm-dd** format.  
+- Store dates internally in **yyyy-mm-dd** format.
+- The 'task' must be filled and Dynamically infer the next action/task from the conversation, If any action/task asked/needed after the call then include it within 5-10 words.
+- Before sending JSON, format all notes,reasons,reminders as array of strings like Notes: ["note 1",.., "reason 1",.., "reminder 1",.., "insurance 1",..].
 
 [Predefined Parameters]
 - \`practice_id\`: \`${practice_id}\`.
@@ -259,22 +264,34 @@ You are ${agent_name}, a professional AI dental voice assistant. Your goal is to
 - Accepted \`insurance_providers\` comes from the \`important_details\` tool response.
   - If not listed: 
     - Then say like: “Yes we do take that insurance, but we are not an in-network participating provider. You can still use your insurance here and we still handle all of the insurance claims and billing for you. For most plans, there isn’t much a difference for in or out of network coverage if at all. ” [Add continuity like: Should I continue for booking appointment?].
-    - Add to notes at the end: "Patient has this insurance: [Insurance Name]".
+    - Add to notes array: "Patient has this insurance: [Insurance Name]".
 
 [Call Flow & Tasks]  
 **Introduction**  
 - Say: “Thank you for calling ${practice_name}. This is ${agent_name}, your AI assistant. How can I help you?” 
   - (Determine intention for the call):
-    - Always Collect caller important details by proceeding to **Caller Important Details** section.(very Important)
-    - If caller wants to schedule an appointment, proceed to **Booking Appointment**  section.  
-    - If all other types of requests (for example: reschedule, cancel an appointment, billing questions, dental records transfer, insurance verification, inquiry about insurance, treatment queries, or messages for the doctor or unrelated or talk to the real person): Directly switch to **Note Taking**. → Never ask for user's approval to take notes. → Never ask “should I take a note?” or similar. → Start note taking automatically every time.
+    - If the caller wants to schedule:
+      - 1.Take name and DOB by proceeding **Caller Important Details** section.
+      - 2.proceed to **Booking Appointment** section.  
+    - If the caller wants to reschedule:
+      - 1.Take name and DOB by proceeding **Caller Important Details** section.
+      - 2.Ask for the reason of reschedule and add it to notes array. 3.Set 'is_new_patient' to false. 4. Add "Called to reschedule" to the notes array.
+      - 5.(Never ask for insurance, visited before related questions)Suggest next available slots by proceeding to **Booking Appointment** section.
+    - If the caller wants to cancel:
+      - 1.Take name and DOB by proceeding **Caller Important Details** section.
+      - 2.Ask for the reason of cancellation and add it to notes array. 3.set 'is_new_patient' to false. 4.Try to convince the caller once to reschedule rather than cancel.
+      - 5.If wants to reschedule then proceed to reschedule section.
+        - If still wants to cancel then say like someone will be calling back regarding cancellation. And add task related to callback regarding cancellation. Then proceed to **Note Taking** section.
+    - If all other types of requests (for example: billing questions, records transfer, insurance verification or inquiry, treatment queries, messages for the doctor, unrelated or talk to the real person):
+      - 1.Take name and DOB by proceeding **Caller Important Details** section.
+      - 2.Directly switch to **Note Taking**. → Never ask for user's approval to take notes. → Never ask “should I take a note?” or similar. → Start note taking automatically every time.
 
 **Caller Important Details**  
 - “Can i have your full name?” 
   - First name and last name are both required, if only one is provided ask for the other.
-  - Confirm: “I got [Full Name in uppercase letters, each letter separated by hyphens], did i get right?” 
-    - (Determine intent: Name is correct or not)(true/false):
-    - If not Say: “Alright, Could you please Spell your full name? So, I can Note it correctly.”
+  - Confirm: “I got First Name: [each letter separated by space] and Last Name: [each letter separated by space], did i get right?”
+   - If wants to update first or last name, ask for the spelling or update if provided.
+  - Always ensure both first and last names exist before continuing to next step.
 - “What’s your Date of Birth?”
 
 **Booking Appointment**  
@@ -294,7 +311,7 @@ You are ${agent_name}, a professional AI dental voice assistant. Your goal is to
           - Confirm: “For [Subscriber] the date of birth is [DOB in words] and the id is [Subscriber ID], Am i right?”
       - If has insurance that is not listed (false): 
         - 'insurance' boolean will be false and 'insurance_name' will be empty string. 
-        - Add the insurance name in the note at the end like “Patient have this insurance: [Insurance Name]”.
+        - Add "Patient has this insurance: [Insurance Name]" in the notes array.
       - If no insurance (false): proceed to next step.
 2. Suggest appointment slots:  
   - Trigger \`fetch_slot\` tool to get available slots for booking, with \`practice_id\` as the body parameter, where \`start_date\` and \`end_date\` will not be sent for first time.  
@@ -306,31 +323,30 @@ You are ${agent_name}, a professional AI dental voice assistant. Your goal is to
         - If asked for any month then trigger the \`fetch_slot\` tool where \`start_date\` is the first day of that month and \`end_date\` is the last day of that month.
         - If the fetched slots are empty for that date then say: “Sorry, we're unavailable on that date. Would you prefer [Nearby Date 1 in words] or [Nearby Date 2 in words] etc.?”
           - If still not suitable then refetch slots for that date.
-    - Ask: “So, on [Date in words], which time works best for your visit — [only mention the available groups (morning, noon, evening)]?”
+    - Ask: “So, on [Date in words], which time works best for your visit — [only mention the available groups (morning, afternoon, evening)]?”
     - Suggest **slots time**: “On [visit], We have [Time 1 in AM/PM] or [Time 2 in AM/PM] or [Time 3 in AM/PM] etc. Which time you prefer?”
   - Ask: “So, Do you want to add any type of notes or reminders?”
     - (Determine intent: Wants to add notes or reminders)(true/false):
-      - If yes then take the note and store it in the notes variable.
+      - If yes then take the note and store it in the notes array.
       - If no then proceed to next step.
 3. Final Step of Booking Appointment:  
   - Proceed to **Send JSON** section.
   - Say: “our appointment for [Date] at [Time] is confirmed. Please arrive 5 to 10 minutes early for some paperwork. Thanks for choosing us, and we look forward to seeing you then!. Alright. So, Can i help you with anything else?”
   - (Determine intent: Wants help or not)(true/false):
-    - If caller inquires about anything else then provide it.
-    - If don’t want any help then proceed to **Ending Call** section.
+    - If inquires something, provide it.
+    - If don't want any help, proceed to **Ending Call** section.
 
 **Note taking**  
-  - proceed to **Caller Important Details** section and collect the caller name and Date of Birth.(very Important)
-  - Store everything the caller said as a note and add it in the notes variable.
+  - Store everything the caller said as a note and add it in the notes array.
   - Provide all the required keys and values in the JSON format although some values can be empty strings.
     - Proceed to **Send JSON** section.
   - say: “OK, I Noted the details. We will call you back with your request. So, Can i help you with anything else?”  
     - (Determine intent: Wants help or not)(true/false):
-     - If caller inquires about anything else then provide it.
-     - If don’t want any help then proceed to **Ending Call** section.
+     - If inquires something, provide it.
+     - If don't want any help, proceed to **Ending Call** section.
 
 **Send JSON**  
-  - (Determine the intention for the call: Called for booking or rescheduling an appointment then set the 'booking_intention' variable to true).
+  - (Determine the caller intention for the call: Called for booking or rescheduling an appointment then set the 'booking_intention' variable to true).
   - If appointment is confirmed or booked then set the 'appointment_confirmed' variable to true.
   - Trigger \`send_json\` tool with the gathered details in JSON format to store the appointment or note.
 
@@ -339,7 +355,7 @@ You are ${agent_name}, a professional AI dental voice assistant. Your goal is to
 
 [Error Handling / Fallback]  
 - Unclear input: “I’m sorry, I didn’t catch that. Could you repeat it?”  
-- System error while fetching slot: “Sorry ,I'm unable to check the slots right now. Could you provide your preferred date time for the visit I will note it down.”(add inside the notes variable)`//prompt
+- System error while fetching slot: “Sorry ,I'm unable to check the slots right now. Could you provide your preferred date time for the visit I will note it down.”(add inside the notes array)`//prompt
                         }
                     ]
                 }
@@ -457,7 +473,7 @@ const vapiAssistant = async (practice_id: string): Promise<boolean> => {
                     role: "system",
                     content: `[Fetch Important Details]
 - Trigger \`important_details\` tool at first in top priority to fetch important details to be used in the conversation.
-  - If the tool fails to fetch the details, say: “Sorry for the delay” and use {{now}} as the current date. Then proceed to next section.
+  - If the tool fails to fetch the details, use {{now}} as the current date. Then proceed to next section.
 
 [Custom Instructions]
 ${custom_instructions && custom_instructions.length ? custom_instructions.map((inst: any) => `- ${inst}`).join('\n') : ''}
@@ -479,7 +495,9 @@ You are ${agent_name}, a professional AI dental voice assistant. Your goal is to
 - Keep responses concise and focused on appointments.  
 - always Trigger \`send_json\` tool with all the keys and values can be empty strings before trigger \`end_call_tool\`.
 - If the caller is old patient/returning patient/visited before then skip all insurance related questions.
-- Store dates internally in **yyyy-mm-dd** format.  
+- Store dates internally in **yyyy-mm-dd** format.
+- The 'task' must be filled and Dynamically infer the next action/task from the conversation, If any action/task asked/needed after the call then include it within 5-10 words.
+- Before sending JSON, format all notes,reasons,reminders as array of strings like Notes: ["note 1",.., "reason 1",.., "reminder 1",.., "insurance 1",..].
 
 [Predefined Parameters]
 - \`practice_id\`: \`${practice_id}\`.
@@ -490,22 +508,34 @@ You are ${agent_name}, a professional AI dental voice assistant. Your goal is to
 - Accepted \`insurance_providers\` comes from the \`important_details\` tool response.
   - If not listed: 
     - Then say like: “Yes we do take that insurance, but we are not an in-network participating provider. You can still use your insurance here and we still handle all of the insurance claims and billing for you. For most plans, there isn’t much a difference for in or out of network coverage if at all. ” [Add continuity like: Should I continue for booking appointment?].
-    - Add to notes at the end: "Patient has this insurance: [Insurance Name]".
+    - Add to notes array: "Patient has this insurance: [Insurance Name]".
 
 [Call Flow & Tasks]  
 **Introduction**  
 - Say: “Thank you for calling ${practice_name}. This is ${agent_name}, your AI assistant. How can I help you?” 
   - (Determine intention for the call):
-    - Always Collect caller important details by proceeding to **Caller Important Details** section.(very Important)
-    - If caller wants to schedule an appointment, proceed to **Booking Appointment**  section.  
-    - If all other types of requests (for example: reschedule, cancel an appointment, billing questions, dental records transfer, insurance verification, inquiry about insurance, treatment queries, or messages for the doctor or unrelated or talk to the real person): Directly switch to **Note Taking**. → Never ask for user's approval to take notes. → Never ask “should I take a note?” or similar. → Start note taking automatically every time.
+    - If the caller wants to schedule:
+      - 1.Take name and DOB by proceeding **Caller Important Details** section.
+      - 2.proceed to **Booking Appointment** section.  
+    - If the caller wants to reschedule:
+      - 1.Take name and DOB by proceeding **Caller Important Details** section.
+      - 2.Ask for the reason of reschedule and add it to notes array. 3.Set 'is_new_patient' to false. 4. Add "Called to reschedule" to the notes array.
+      - 5.(Never ask for insurance, visited before related questions)Suggest next available slots by proceeding to **Booking Appointment** section.
+    - If the caller wants to cancel:
+      - 1.Take name and DOB by proceeding **Caller Important Details** section.
+      - 2.Ask for the reason of cancellation and add it to notes array. 3.set 'is_new_patient' to false. 4.Try to convince the caller once to reschedule rather than cancel.
+      - 5.If wants to reschedule then proceed to reschedule section.
+        - If still wants to cancel then say like someone will be calling back regarding cancellation. And add task related to callback regarding cancellation. Then proceed to **Note Taking** section.
+    - If all other types of requests (for example: billing questions, records transfer, insurance verification or inquiry, treatment queries, messages for the doctor, unrelated or talk to the real person):
+      - 1.Take name and DOB by proceeding **Caller Important Details** section.
+      - 2.Directly switch to **Note Taking**. → Never ask for user's approval to take notes. → Never ask “should I take a note?” or similar. → Start note taking automatically every time.
 
 **Caller Important Details**  
 - “Can i have your full name?” 
   - First name and last name are both required, if only one is provided ask for the other.
-  - Confirm: “I got [Full Name in uppercase letters, each letter separated by hyphens], did i get right?” 
-    - (Determine intent: Name is correct or not)(true/false):
-    - If not Say: “Alright, Could you please Spell your full name? So, I can Note it correctly.”
+  - Confirm: “I got First Name: [each letter separated by space] and Last Name: [each letter separated by space], did i get right?”
+   - If wants to update first or last name, ask for the spelling or update if provided.
+  - Always ensure both first and last names exist before continuing to next step.
 - “What’s your Date of Birth?”
 
 **Booking Appointment**  
@@ -525,7 +555,7 @@ You are ${agent_name}, a professional AI dental voice assistant. Your goal is to
           - Confirm: “For [Subscriber] the date of birth is [DOB in words] and the id is [Subscriber ID], Am i right?”
       - If has insurance that is not listed (false): 
         - 'insurance' boolean will be false and 'insurance_name' will be empty string. 
-        - Add the insurance name in the note at the end like “Patient have this insurance: [Insurance Name]”.
+        - Add "Patient has this insurance: [Insurance Name]" in the notes array.
       - If no insurance (false): proceed to next step.
 2. Suggest appointment slots:  
   - Trigger \`fetch_slot\` tool to get available slots for booking, with \`practice_id\` as the body parameter, where \`start_date\` and \`end_date\` will not be sent for first time.  
@@ -537,31 +567,30 @@ You are ${agent_name}, a professional AI dental voice assistant. Your goal is to
         - If asked for any month then trigger the \`fetch_slot\` tool where \`start_date\` is the first day of that month and \`end_date\` is the last day of that month.
         - If the fetched slots are empty for that date then say: “Sorry, we're unavailable on that date. Would you prefer [Nearby Date 1 in words] or [Nearby Date 2 in words] etc.?”
           - If still not suitable then refetch slots for that date.
-    - Ask: “So, on [Date in words], which time works best for your visit — [only mention the available groups (morning, noon, evening)]?”
+    - Ask: “So, on [Date in words], which time works best for your visit — [only mention the available groups (morning, afternoon, evening)]?”
     - Suggest **slots time**: “On [visit], We have [Time 1 in AM/PM] or [Time 2 in AM/PM] or [Time 3 in AM/PM] etc. Which time you prefer?”
   - Ask: “So, Do you want to add any type of notes or reminders?”
     - (Determine intent: Wants to add notes or reminders)(true/false):
-      - If yes then take the note and store it in the notes variable.
+      - If yes then take the note and store it in the notes array.
       - If no then proceed to next step.
 3. Final Step of Booking Appointment:  
   - Proceed to **Send JSON** section.
   - Say: “our appointment for [Date] at [Time] is confirmed. Please arrive 5 to 10 minutes early for some paperwork. Thanks for choosing us, and we look forward to seeing you then!. Alright. So, Can i help you with anything else?”
   - (Determine intent: Wants help or not)(true/false):
-    - If caller inquires about anything else then provide it.
-    - If don’t want any help then proceed to **Ending Call** section.
+    - If inquires something, provide it.
+    - If don't want any help, proceed to **Ending Call** section.
 
 **Note taking**  
-  - proceed to **Caller Important Details** section and collect the caller name and Date of Birth.(very Important)
-  - Store everything the caller said as a note and add it in the notes variable.
+  - Store everything the caller said as a note and add it in the notes array.
   - Provide all the required keys and values in the JSON format although some values can be empty strings.
     - Proceed to **Send JSON** section.
   - say: “OK, I Noted the details. We will call you back with your request. So, Can i help you with anything else?”  
     - (Determine intent: Wants help or not)(true/false):
-     - If caller inquires about anything else then provide it.
-     - If don’t want any help then proceed to **Ending Call** section.
+     - If inquires something, provide it.
+     - If don't want any help, proceed to **Ending Call** section.
 
 **Send JSON**  
-  - (Determine the intention for the call: Called for booking or rescheduling an appointment then set the 'booking_intention' variable to true).
+  - (Determine the caller intention for the call: Called for booking or rescheduling an appointment then set the 'booking_intention' variable to true).
   - If appointment is confirmed or booked then set the 'appointment_confirmed' variable to true.
   - Trigger \`send_json\` tool with the gathered details in JSON format to store the appointment or note.
 
@@ -570,7 +599,7 @@ You are ${agent_name}, a professional AI dental voice assistant. Your goal is to
 
 [Error Handling / Fallback]  
 - Unclear input: “I’m sorry, I didn’t catch that. Could you repeat it?”  
-- System error while fetching slot: “Sorry ,I'm unable to check the slots right now. Could you provide your preferred date time for the visit I will note it down.”(add inside the notes variable)`//prompt
+- System error while fetching slot: “Sorry ,I'm unable to check the slots right now. Could you provide your preferred date time for the visit I will note it down.”(add inside the notes array)`//prompt
                 }
             ]
         },
@@ -772,13 +801,19 @@ export const getAiReceptionistCallsService = async (data: AICallQuery): Promise<
     }
 
     if (call_list_res?.rows) {
+        const result = call_list_res.rows.map((row: any) => ({
+            ...row,
+            recording_url: row.recording_url
+                ? `${process.env.AI_RECEPTIONIST_CDN}${row.recording_url}`
+                : row.recording_url
+        }));
         return {
             success: 1,
             status_code: app_constants.SUCCESS_OK,
             message: "Call list has been fetched successfully!",
             total_count: Number(count_res?.rows[0]?.total_count || 0),
             new_patient_booked_count: Number(count_res?.rows[0]?.new_patient_booked_count || 0),
-            result: call_list_res?.rows || []
+            result: result || []
         };
     }
 
@@ -890,6 +925,10 @@ export const getAiReceptionistCallDetailsService = async (data: AICallQuery): Pr
             row.appointment_details.prov_profile_pic = `${process.env.AWS_CDN_LINK}${row.appointment_details.prov_profile_pic}`;
         }
 
+        if (row.recording_url) {
+            row.recording_url = `${process.env.AI_RECEPTIONIST_CDN}${row.recording_url}`;
+        }
+
         return {
             success: 1,
             status_code: app_constants.SUCCESS_OK,
@@ -987,6 +1026,8 @@ export const saveAiReceptionistCallService = async (data: any): Promise<boolean>
     const { messages: artifact_messages } = artifact
     const call_number = customer?.number;
 
+    const recording_url = recordingUrl;
+
     const vapi_number_id = phoneNumber?.id;
 
     // crete apt
@@ -1012,7 +1053,29 @@ export const saveAiReceptionistCallService = async (data: any): Promise<boolean>
         try {
             parsed_apt_data = JSON.parse(apt_string);
             console.log("Parsed Args:", parsed_apt_data);
-            notes = parsed_apt_data.note ? `${parsed_apt_data.note} | ${parsed_apt_data.dental_issue || ''}` : parsed_apt_data.dental_issue || '';
+            // notes = parsed_apt_data.note ? `${parsed_apt_data.note} | ${parsed_apt_data.dental_issue || ''}` : parsed_apt_data.dental_issue || '';
+
+            let note_text = '';
+            if (parsed_apt_data.note) {
+                if (Array.isArray(parsed_apt_data.note)) {
+                    // Join array elements with ' , '
+                    note_text = parsed_apt_data.note.filter((n: any) => n && n.trim()).join(', ');
+                } else if (typeof parsed_apt_data.note === 'string') {
+                    note_text = parsed_apt_data.note.trim();
+                }
+            }
+
+            // Combine note and dental_issue
+            const dental_issue = parsed_apt_data.dental_issue?.trim() || '';
+
+            if (note_text && dental_issue) {
+                notes = `${note_text} | ${dental_issue}`;
+            } else if (note_text) {
+                notes = note_text;
+            } else if (dental_issue) {
+                notes = dental_issue;
+            }
+
 
             is_new_patient = typeof parsed_apt_data?.is_new_patient === 'boolean'
                 ? parsed_apt_data.is_new_patient
@@ -1022,7 +1085,18 @@ export const saveAiReceptionistCallService = async (data: any): Promise<boolean>
                 ? parsed_apt_data.booking_intention
                 : null;
 
-            if (parsed_apt_data && parsed_apt_data.appointment_confirmed == true) {
+
+            // check if apt booking is enable
+            const settings_query = `SELECT is_appointment_booking_allowed
+                                    FROM ai_receptionist_settings
+                                    WHERE practice_id = $1`;
+
+            const result = await postgresDB.execquery(settings_query, [parsed_apt_data?.practice_id]) as QueryResult;
+
+            const is_apt_booking_allowed = result?.rows[0]?.is_appointment_booking_allowed;
+
+
+            if (parsed_apt_data && parsed_apt_data.appointment_confirmed == true && is_apt_booking_allowed) {
                 const booked_appointment_id = await bookAiAppointmentService(parsed_apt_data);
 
                 if (booked_appointment_id) {
@@ -1044,12 +1118,8 @@ export const saveAiReceptionistCallService = async (data: any): Promise<boolean>
             console.error("Invalid JSON in arguments:", err);
         }
 
-
     };
 
-
-
-    // await downloadAndUploadRecordingToS3(recordingUrl, call?.id);
 
     // calls flow
     const practice_query = `select practice_id
@@ -1088,7 +1158,7 @@ export const saveAiReceptionistCallService = async (data: any): Promise<boolean>
                         is_new_patient,
                         booking_intention,
                         inserted_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())`;
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW()) RETURNING id;`;
 
     const params = [
         practice_id,
@@ -1096,7 +1166,7 @@ export const saveAiReceptionistCallService = async (data: any): Promise<boolean>
         vapi_number_id,
         call_number,
         JSON.stringify(conversation),
-        recordingUrl,
+        recording_url,
         startedAt,
         summary,
         cost,
@@ -1114,6 +1184,38 @@ export const saveAiReceptionistCallService = async (data: any): Promise<boolean>
         console.log('Failed to save ai_receptionist_calls for practice_id:', practice_id);
         return false;
     }
+
+    if (parsed_apt_data?.task) {
+        // create task
+        const task_query = `INSERT INTO ai_receptionist_tasks (
+                            practice_id,
+                            call_id,
+                            task_description,
+                            created_at
+                        ) VALUES ($1, $2, $3, NOW());`;
+
+        const task_params = [
+            practice_id,
+            result.rows[0].id,
+            parsed_apt_data.task
+        ];
+
+        const task_result = await postgresDB.execquery(task_query, task_params) as QueryResult;
+        if (!task_result?.rowCount) {
+            console.log('Failed to save ai_receptionist_tasks for practice_id:', practice_id);
+        }
+
+    }
+
+    const job = {
+        event_type: 'save_call_recording',
+        event_data: {
+            practice_id,
+            call_id: result.rows[0].id,
+            recording_url,
+        }
+    }
+    addAiReceptionistJob(job);
 
     return true;
 
@@ -1264,18 +1366,18 @@ export const downloadAndUploadRecordingToS3 = async (RecordingUrl: string, call_
         const vapi_recording_data = await axios({
             method: 'GET',
             url: `${RecordingUrl}`,
-            responseType: 'stream'
+            responseType: 'arraybuffer'
         });
 
-        // console.log('Recording downloaded from Twilio.', twilioResponse);
+        const buffer = Buffer.from(vapi_recording_data.data);
 
         const contentType = vapi_recording_data.headers['content-type'];
 
         const s3_key = `aiReceptionist_call_recordings/call_${call_id}`;
         const uploadCommand = new PutObjectCommand({
-            Bucket: s3BucketName,
+            Bucket: aiReceptionistBucketName,
             Key: s3_key,
-            Body: vapi_recording_data.data,
+            Body: buffer,
             ContentType: contentType ? contentType : 'audio/wav',
         });
 
@@ -1297,7 +1399,16 @@ const buildMessageField = (parsed_apt_data: any) => {
     const parts: string[] = [];
 
     if (parsed_apt_data.note) {
-        parts.push(`message: ${parsed_apt_data.note}`);
+        if (Array.isArray(parsed_apt_data.note)) {
+            // If array, join with ' , '
+            const noteString = parsed_apt_data.note.filter((n: any) => n).join(', ');
+            if (noteString) {
+                parts.push(`message: ${noteString}`);
+            }
+        } else if (typeof parsed_apt_data.note === 'string' && parsed_apt_data.note.trim()) {
+            // If string, use directly
+            parts.push(`message: ${parsed_apt_data.note}`);
+        }
     }
 
     if (parsed_apt_data.dental_issue) {
@@ -1319,7 +1430,6 @@ const buildMessageField = (parsed_apt_data: any) => {
         if (parsed_apt_data.subscriber_id) {
             parts.push(`Subscriber ID: ${parsed_apt_data.subscriber_id}`);
         }
-
         // if (parsed_apt_data.insurance_provider) {
         //     parts.push(`Insurance: ${parsed_apt_data.insurance_provider}`);
         // }
@@ -1330,3 +1440,128 @@ const buildMessageField = (parsed_apt_data: any) => {
     console.log('msg parts:', parts);
     return parts.join(' | ');
 };
+
+export const saveCallRecordingsService = async (data: any): Promise<boolean> => {
+    const { practice_id, call_id, recording_url } = data;
+
+    const s3_key = await downloadAndUploadRecordingToS3(recording_url, call_id);
+
+    if (!s3_key) {
+        console.log('Failed to upload call recording to S3 for call id:', call_id);
+        return false;
+    }
+
+    const update_query = `UPDATE ai_receptionist_calls 
+                          SET recording_url = $1 
+                          WHERE practice_id = $2 
+                          AND id = $3`;
+
+    const update_res = await postgresDB.execquery(update_query, [s3_key, practice_id, call_id]) as QueryResult;
+
+    if (!update_res?.rowCount) {
+        console.log('Failed to update recording_url in ai_receptionist_calls for call id:', call_id);
+        return false;
+    }
+
+    return true;
+
+};
+
+export const taskListService = async (data: any): Promise<any> => {
+    const { practice_id, offset = 0, limit = 20, is_completed = false, search = '' } = data;
+    const server_tz = await getPracticeServerTZ(practice_id);
+
+    let params: any[] = [practice_id];
+    let num = 2;
+
+    let where_condition = `WHERE task.practice_id = $1`;
+    
+    if (search && search.trim()) {
+        where_condition += ` AND (
+            task.task_description ILIKE $${num} 
+            OR call.call_number ILIKE $${num}
+        )`;
+        params.push(`%${search.trim()}%`);
+        num++;
+    }
+
+    where_condition += ` AND task.is_completed = $${num}`;
+    params.push(is_completed);
+    num++;
+
+    const task_list_query = `
+        SELECT 
+            task.id, task.practice_id, task.call_id,
+            task.task_description, task.is_completed,
+            call.recording_url,
+            (call.called_at AT TIME ZONE '${server_tz}') AS called_at, 
+            call.call_number, 
+            (task.created_at AT TIME ZONE '${server_tz}') AS created_at,
+            (task.updated_at AT TIME ZONE '${server_tz}') AS updated_at
+        FROM ai_receptionist_tasks task
+        INNER JOIN ai_receptionist_calls call
+            ON call.id = task.call_id
+        ${where_condition}
+        ORDER BY task.created_at DESC
+        OFFSET $${num} LIMIT $${num + 1}
+    `;
+
+    params.push(offset, limit);
+
+    const count_query = `
+        SELECT COUNT(task.id)::BIGINT AS total_count
+        FROM ai_receptionist_tasks task
+        INNER JOIN ai_receptionist_calls call
+            ON call.id = task.call_id
+        ${where_condition}
+    `;
+
+
+    const count_params = params.slice(0, -2);
+
+    const [task_list_res, count_res] = await Promise.all([
+        postgresDB.execquery(task_list_query, params),
+        postgresDB.execquery(count_query, count_params)
+    ]);
+
+    if (task_list_res instanceof Error || count_res instanceof Error) {
+        return app_constants.ERROR_RESPONSE;
+    }
+
+    const result = task_list_res?.rows?.map((row: any) => ({
+        ...row,
+        recording_url: row.recording_url
+            ? `${process.env.AI_RECEPTIONIST_CDN}${row.recording_url}`
+            : row.recording_url
+    })) || [];
+
+    return {
+        success: 1,
+        status_code: app_constants.SUCCESS_OK,
+        message: "Task list has been fetched successfully!",
+        total_count: Number(count_res?.rows[0]?.total_count || 0),
+        result
+    };
+};
+
+export const toggleTaskStatusService = async (data: any): Promise<any> => {
+    const { practice_id, task_id, is_completed = false } = data;
+
+    const update_query = `UPDATE ai_receptionist_tasks 
+                          SET is_completed = $1,
+                          updated_at = NOW() 
+                          WHERE practice_id = $2 
+                          AND id = $3`;
+
+    const update_res = await postgresDB.execquery(update_query, [is_completed, practice_id, task_id]) as QueryResult;
+    if (!update_res?.rowCount) {
+        console.log('Failed to update is_completed in ai_receptionist_tasks for task id:', task_id);
+        return app_constants.ERROR_RESPONSE;
+    }
+
+    return {
+        success: 1,
+        status_code: app_constants.SUCCESS_OK,
+        message: `Task has been marked as ${is_completed ? 'completed' : 'incomplete'} successfully!`,
+    }
+}
