@@ -624,6 +624,11 @@ You are ${agent_name}, a professional AI dental voice assistant. Your goal is to
             "assistant-speaks-first-with-model-generated-message",
         analysisPlan: { minMessagesThreshold: 2 },
         backgroundDenoisingEnabled: true,
+        artifactPlan: {
+            structuredOutputIds: [
+                "3c4eb35a-997f-4586-9acb-71a85227f5f0"
+            ]
+        },
         messagePlan: {
             idleMessages: [
                 "Are you still there?"

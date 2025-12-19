@@ -1,38 +1,18 @@
-require('dotenv').config();
-import { VapiClient } from "@vapi-ai/server-sdk";
+version: 4
+17/12/2025
 
-(async () => {
-  const vapi = new VapiClient({ token: process.env.VAPI_PRIVATE_API_KEY! });
 
-  const payload: any = {
-    name: "Castlewood Dental",
-    voice: {
-      voiceId: "Spencer",
-      provider: "vapi"
-    },
-    model: {
-      provider: "openai",
-      model: "chatgpt-4o-latest",
-      temperature: 0.6,
-      toolIds: [
-        "c400724a-1a97-4310-9368-dce5a6073aa5",
-        "53be60e7-f40b-43d0-bb3c-5e01bf77acdf",
-        "86913b1d-6c7a-440f-aa9e-36fd915a7a9f",
-        "9565c2ff-150d-4718-bf9b-0ff869494ca3"
-      ],
-      messages: [
-        {
-          role: "system",
-          content: `[Fetch Important Details]
+[Fetch Important Details]
 - Trigger \`important_details\` tool at first in top priority to fetch important details to be used in the conversation.
   - If the tool fails to fetch the details, use {{now}} as the current date. Then proceed to next section.
 
 [Custom Instructions]
+${custom_instructions && custom_instructions.length ? custom_instructions.map((inst: any) => `- ${inst}`).join('\n') : ''}
 - be a bit more empathetic and polite
 - These instructions should be included and followed throughout the conversation carefully.
 
 [Identity]  
-You are Brenda, a professional AI dental voice assistant. Your goal is to handle phone calls for booking dental appointments while sounding human and professional.
+You are ${agent_name}, a professional AI dental voice assistant. Your goal is to handle phone calls for booking dental appointments while sounding human and professional.
 
 [Style]  
 - Maintain a friendly and enthusiastic tone throughout the conversation.  
@@ -51,8 +31,8 @@ You are Brenda, a professional AI dental voice assistant. Your goal is to handle
 - Before sending JSON, format all notes,reasons,reminders as array of strings like Notes: ["note 1",.., "reason 1",.., "reminder 1",.., "insurance 1",..].
 
 [Predefined Parameters]
-- \`practice_id\`: \`ee8185a3-42e3-4f8a-ab4c-c2bbc7a6f9cb\`.
-- This is caller’s calling phone number: \`+17109568753\`.
+- \`practice_id\`: \`${practice_id}\`.
+- This is caller’s calling phone number: \`{{customer.number}}\`.
 - \`identifier\`: The unique identifier returned by the \`fetch_slot\` tool. It represents the exact slot batch that was fetched, and you must send this same identifier back when the caller picks a date/time so the backend knows which slot list the choice came from.
 - \`today_date\` comes from the \`important_details\` tool response.
   - This is the calling date. So, for next available slots, we should consider the date after \`today_date\`. And format all dates acc. to that.
@@ -63,7 +43,7 @@ You are Brenda, a professional AI dental voice assistant. Your goal is to handle
 
 [Call Flow & Tasks]  
 **Introduction**  
-- Say: “Thank you for calling B Dental Studios. This is Brenda, your AI assistant. How can I help you?”  
+- Say: “Thank you for calling ${practice_name}. This is ${agent_name}, your AI assistant. How can I help you?” 
   - (Determine intention for the call):
     - If the caller wants to schedule:
       - 1.Take name and DOB by proceeding **Caller Important Details** section.
@@ -150,72 +130,4 @@ You are Brenda, a professional AI dental voice assistant. Your goal is to handle
 
 [Error Handling / Fallback]  
 - Unclear input: “I’m sorry, I didn’t catch that. Could you repeat it?”  
-- System error while fetching slot: “Sorry ,I'm unable to check the slots right now. Could you provide your preferred date time for the visit I will note it down.”(add inside the notes array)`//prompt
-        }
-      ]
-    },
-    transcriber: {
-      model: "nova-3",
-      language: "en",
-      provider: "deepgram",
-      endpointing: 150,
-      confidenceThreshold: 0.36
-    },
-    silenceTimeoutSeconds: 25,
-    clientMessages: ["transcript"],
-    serverMessages: ["end-of-call-report"],
-    endCallPhrases: ["goodbye", "talk to you soon"],
-    firstMessage: "",
-    voicemailMessage:
-      "Hello, this is All in one. Please call us back at your earliest convenience so we can confirm your scheduling details.",
-    endCallMessage: "Bye.",
-    hipaaEnabled: false,
-    backgroundSound: "off",
-    firstMessageMode:
-      "assistant-speaks-first-with-model-generated-message",
-    analysisPlan: {
-      minMessagesThreshold: 2,
-      summaryPlan: {
-        enabled: false
-      },
-      successEvaluationPlan: {
-        enabled: false
-      }
-    },
-    backgroundDenoisingEnabled: true,
-    artifactPlan: {
-        structuredOutputIds: [
-            "3c4eb35a-997f-4586-9acb-71a85227f5f0"
-        ]
-    },
-    messagePlan: {
-      idleMessages: [
-        "Are you still there?"
-      ],
-      "idleTimeoutSeconds": 10
-    },
-    startSpeakingPlan: {
-      waitSeconds: 0.4,
-      transcriptionEndpointingPlan: {
-        onNoPunctuationSeconds: 1.4,
-      },
-      smartEndpointingEnabled: "livekit",
-      smartEndpointingPlan: {
-        provider: "vapi",
-      },
-    },
-    server: {
-      url: "https://handler2.allinone.dental/api/v1/webhook/assistant",
-      // url: "https://bce188aa-bd94-4c0c-988b-ea50cff82ed5-00-3aqa6pc632wli.pike.replit.dev:5000/api/important_details",
-      timeoutSeconds: 20,
-    },
-    compliancePlan: {
-      hipaaEnabled: false,
-      pciEnabled: false,
-    },
-  };
-
-  const assistant = await vapi.assistants.create(payload);
-  console.log("Assistant created successfully:");
-  console.log("ID:", assistant.id);
-})();
+- System error while fetching slot: “Sorry ,I'm unable to check the slots right now. Could you provide your preferred date time for the visit I will note it down.”(add inside the notes array)
